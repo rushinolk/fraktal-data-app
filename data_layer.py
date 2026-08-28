@@ -169,9 +169,47 @@ def buscar_pipeline() -> pd.DataFrame:
     df["nicho_mercado"] = df["nichos"].apply(lambda n: n.get("nome") if isinstance(n, dict) else None)
     df = df.drop(columns=["nichos", "id", "nicho_id", "created_at"], errors="ignore")
     df["valor_estimado"] = pd.to_numeric(df["valor_estimado"], errors="coerce")
+    # Vem como string ISO do Supabase -- precisa ser datetime de verdade
+    # pra st.column_config.DateColumn aceitar editar a coluna.
+    df["data_prevista"] = pd.to_datetime(df["data_prevista"], errors="coerce")
 
     ordem = ["nome_contato", "nicho_mercado", "status", "valor_estimado", "data_prevista", "observacoes"]
     return df[[c for c in ordem if c in df.columns]]
+
+
+@st.cache_data(ttl=5)
+def buscar_pipeline_convertivel() -> list[dict]:
+    """
+    Itens do pipeline ainda não fechados, usados pra popular o conversor
+    "Pipeline -> Trabalho" na aba de Projetos em Aberto.
+    """
+    client = _conectar()
+    resposta = (
+        client.table("pipeline")
+        .select("id, nome_contato, nicho_id, valor_estimado, nichos(nome)")
+        .neq("status", "Fechado")
+        .order("id")
+        .execute()
+    )
+    dados = resposta.data or []
+    itens = []
+    for d in dados:
+        nicho = d.get("nichos") or {}
+        itens.append({
+            "id": d["id"],
+            "nome_contato": d["nome_contato"],
+            "nicho_id": d["nicho_id"],
+            "nicho_nome": nicho.get("nome"),
+            "valor_estimado": d.get("valor_estimado"),
+        })
+    return itens
+
+
+def marcar_pipeline_fechado(pipeline_id: int):
+    """Marca um item do pipeline como Fechado -- usado quando ele vira um trabalho de verdade."""
+    client = _conectar()
+    client.table("pipeline").update({"status": "Fechado"}).eq("id", pipeline_id).execute()
+    st.cache_data.clear()
 
 
 def salvar_pipeline_item(item: dict):
@@ -189,7 +227,15 @@ def atualizar_pipeline_completo(df: pd.DataFrame):
     faz o mapeamento nome -> id antes de chamar esta função).
     """
     client = _conectar()
-    df_colunas_negocio = df[PIPELINE_COLUNAS]
+    df_colunas_negocio = df[PIPELINE_COLUNAS].copy()
+
+    # Volta de datetime (usado pelo DateColumn na tela) pra string ISO
+    # (ou None se vazio) -- o Supabase espera texto/data, não Timestamp.
+    if "data_prevista" in df_colunas_negocio.columns:
+        df_colunas_negocio["data_prevista"] = pd.to_datetime(
+            df_colunas_negocio["data_prevista"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
+
     df_limpo = df_colunas_negocio.where(pd.notnull(df_colunas_negocio), None)
     registros = df_limpo.to_dict("records")
 
