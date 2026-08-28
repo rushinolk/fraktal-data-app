@@ -1,19 +1,17 @@
 """
 opcoes.py
 ---------
-Listas de opções usadas em campos do formulário que NÃO dependem do nicho
-de mercado (diferente do niches_config.py, que é só sobre isso).
+A partir da v4, os catálogos de negócio (nicho, tipo de cliente, canal,
+serviço, especificidade, pessoas/funções da equipe) moraram pro banco
+(tabelas próprias, geridas direto no Supabase) -- ver data_layer.py.
 
-Para adicionar uma opção nova de canal de aquisição, basta incluir na lista abaixo.
+Este arquivo agora só guarda os domínios REALMENTE fixos, pequenos o
+bastante pra não merecerem uma tabela: status de pagamento, status do
+pipeline e moedas aceitas. Se um desses crescer/mudar de frequência,
+vale reavaliar e mover pra uma tabela também.
 """
 
-CANAIS_AQUISICAO = [
-    "Indicação",
-    "Instagram",
-    "Evento Anterior",
-    "Prospecção Ativa",
-    "Já era Cliente",
-]
+STATUS_PAGAMENTO = ["Pendente", "50% Pago", "Totalmente Pago"]
 
 STATUS_PIPELINE = [
     "Mapeado",
@@ -22,3 +20,5 @@ STATUS_PIPELINE = [
     "Fechado",
     "Perdido",
 ]
+
+MOEDAS = ["BRL", "USD", "EUR"]

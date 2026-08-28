@@ -1,18 +1,16 @@
 """
 ui/pipeline.py
 --------------
-Módulo híbrido: PRODUTOR (formulário pra adicionar um novo item ao pipeline)
-e CONSUMIDOR (tabela editável mostrando os itens já cadastrados). Faz sentido
-ser híbrido aqui porque a natureza do pipeline é justamente acompanhar e
-atualizar status ao longo do tempo -- diferente do formulário de registro
-(só produtor) e do dashboard (só consumidor).
+Módulo híbrido: PRODUTOR (formulário pra adicionar item ao pipeline) e
+CONSUMIDOR (tabela editável). A partir da v4, nicho passou a ser FK pra
+tabela `nichos` -- o dropdown mostra o nome, mas guarda/edita o id por
+baixo (mapeamento feito aqui, não no data_layer).
 """
 
 import streamlit as st
 
-from data_layer import buscar_pipeline, salvar_pipeline_item, atualizar_pipeline_completo
+from data_layer import buscar_pipeline, salvar_pipeline_item, atualizar_pipeline_completo, buscar_nichos
 from opcoes import STATUS_PIPELINE
-from ui.helpers import obter_opcoes_nicho
 
 
 def render():
@@ -22,14 +20,16 @@ def render():
         "Isso é separado dos registros de trabalhos já executados."
     )
 
-    with st.expander("➕ Adicionar novo item ao pipeline"):
-        opcoes_nicho = obter_opcoes_nicho()
+    nichos = buscar_nichos()
+    nomes_nicho = [n["nome"] for n in nichos]
+    id_por_nome_nicho = {n["nome"]: n["id"] for n in nichos}
 
+    with st.expander("➕ Adicionar novo item ao pipeline"):
         col_p1, col_p2, col_p3 = st.columns(3)
         with col_p1:
             nome_contato_pipeline = st.text_input("Nome do Artista/Cliente", key="pipeline_nome")
         with col_p2:
-            nicho_pipeline = st.selectbox("Nicho de Mercado", opcoes_nicho, key="pipeline_nicho")
+            nicho_nome_pipeline = st.selectbox("Nicho de Mercado", nomes_nicho, key="pipeline_nicho")
         with col_p3:
             status_pipeline = st.selectbox("Status", STATUS_PIPELINE, key="pipeline_status")
 
@@ -40,7 +40,7 @@ def render():
             )
         with col_p5:
             data_prevista_pipeline = st.date_input(
-                "Data Prevista do Evento (opcional)", key="pipeline_data"
+                "Data Prevista do Evento (opcional)", key="pipeline_data", format="DD/MM/YYYY"
             )
 
         observacoes_pipeline = st.text_area("Observações", key="pipeline_obs")
@@ -51,7 +51,7 @@ def render():
             else:
                 salvar_pipeline_item({
                     "nome_contato": nome_contato_pipeline,
-                    "nicho_mercado": nicho_pipeline,
+                    "nicho_id": id_por_nome_nicho.get(nicho_nome_pipeline),
                     "status": status_pipeline,
                     "valor_estimado": valor_estimado_pipeline,
                     "data_prevista": str(data_prevista_pipeline),
@@ -72,10 +72,10 @@ def render():
             df_pipeline,
             column_config={
                 "status": st.column_config.SelectboxColumn("Status", options=STATUS_PIPELINE),
+                "nicho_mercado": st.column_config.SelectboxColumn("Nicho", options=nomes_nicho),
                 "nome_contato": "Artista/Cliente",
-                "nicho_mercado": "Nicho",
                 "valor_estimado": st.column_config.NumberColumn("Valor Estimado (R$)", format="R$ %.2f"),
-                "data_prevista": "Data Prevista",
+                "data_prevista": st.column_config.DateColumn("Data Prevista", format="DD/MM/YYYY"),
                 "observacoes": "Observações",
             },
             num_rows="dynamic",
@@ -84,6 +84,8 @@ def render():
         )
 
         if st.button("💾 Salvar alterações no Pipeline"):
-            atualizar_pipeline_completo(df_pipeline_editado)
+            df_para_salvar = df_pipeline_editado.copy()
+            df_para_salvar["nicho_id"] = df_para_salvar["nicho_mercado"].map(id_por_nome_nicho)
+            atualizar_pipeline_completo(df_para_salvar)
             st.success("Pipeline atualizado!")
             st.rerun()

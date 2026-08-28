@@ -2,167 +2,199 @@
 data_layer.py
 --------------
 Esta é a ÚNICA parte do sistema que sabe onde os dados estão guardados.
-Hoje ela fala com o Google Sheets. No futuro, se você migrar para o
-Supabase, só precisa reescrever o CONTEÚDO destas funções -- o resto do
-app (app.py) não muda uma linha, porque ele só conhece essas funções.
 
-Schema v1: 17 colunas (13 originais + canal_aquisicao, tamanho_equipe,
-data_entrega_combinada, nome_evento).
+Schema v4: OLTP normalizado. Catálogos (nichos, tipos_cliente,
+canais_aquisicao, servicos, especificidades, pessoas_equipe,
+funcoes_equipe) são geridos direto no Supabase -- o app só lê. A
+gravação de um trabalho (cliente + trabalho + serviços/especificidades +
+equipe) é feita numa chamada só à função registrar_trabalho() do banco
+(via RPC), que cuida de tudo dentro de uma transação -- assim o Streamlit
+não precisa fazer 4-5 inserts soltos e torcer pra nenhum falhar no meio.
 """
 
 import streamlit as st
 import pandas as pd
-import gspread
-from streamlit_gsheets import GSheetsConnection
-
-COLUNAS = [
-    "nome_projeto",
-    "data_execucao",
-    "nicho_mercado",
-    "tipo_cliente",
-    "nome_cliente",
-    "nome_evento",
-    "canal_aquisicao",
-    "servicos_entregues",
-    "especificidade",
-    "horas_captacao",
-    "horas_edicao",
-    "tamanho_equipe",
-    "cache_total",
-    "custos_operacao",
-    "status_pagamento",
-    "previsao_recebimento",
-    "data_entrega_combinada",
-]
-
-COLUNAS_NUMERICAS = [
-    "horas_captacao",
-    "horas_edicao",
-    "tamanho_equipe",
-    "cache_total",
-    "custos_operacao",
-]
+from supabase import create_client, Client
 
 
-def _conectar():
-    """Abre a conexão com a planilha configurada em .streamlit/secrets.toml"""
-    return st.connection("gsheets", type=GSheetsConnection)
+@st.cache_resource
+def _conectar() -> Client:
+    """Abre (e reaproveita) a conexão com o projeto Supabase."""
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
 
 
-def _abrir_planilha_gspread():
+# ------------------------------------------------------------------
+# CATÁLOGOS -- só leitura. Cacheados por mais tempo (ttl maior) porque
+# mudam raramente (só quando você adiciona algo novo direto no Supabase).
+# ------------------------------------------------------------------
+
+@st.cache_data(ttl=60)
+def buscar_nichos() -> list[dict]:
+    """Cada nicho já traz os flags de comportamento (evento obrigatório,
+    rótulo e tipo da especificidade) -- isso substitui o antigo
+    niches_config.py: agora é dado no banco, não código."""
+    client = _conectar()
+    resposta = client.table("nichos").select("*").order("nome").execute()
+    return resposta.data or []
+
+
+@st.cache_data(ttl=60)
+def buscar_tipos_cliente(nicho_id: int) -> list[dict]:
+    client = _conectar()
+    resposta = (
+        client.table("tipos_cliente")
+        .select("*")
+        .eq("nicho_id", nicho_id)
+        .order("nome")
+        .execute()
+    )
+    return resposta.data or []
+
+
+@st.cache_data(ttl=60)
+def buscar_canais_aquisicao() -> list[dict]:
+    client = _conectar()
+    resposta = client.table("canais_aquisicao").select("*").order("nome").execute()
+    return resposta.data or []
+
+
+@st.cache_data(ttl=60)
+def buscar_servicos() -> list[dict]:
+    client = _conectar()
+    resposta = client.table("servicos").select("*").order("nome").execute()
+    return resposta.data or []
+
+
+@st.cache_data(ttl=60)
+def buscar_especificidades(nicho_id: int) -> list[dict]:
+    client = _conectar()
+    resposta = (
+        client.table("especificidades")
+        .select("*")
+        .eq("nicho_id", nicho_id)
+        .order("nome")
+        .execute()
+    )
+    return resposta.data or []
+
+
+@st.cache_data(ttl=60)
+def buscar_pessoas_equipe() -> list[dict]:
+    client = _conectar()
+    resposta = client.table("pessoas_equipe").select("*").order("nome").execute()
+    return resposta.data or []
+
+
+@st.cache_data(ttl=60)
+def buscar_funcoes_equipe() -> list[dict]:
+    client = _conectar()
+    resposta = client.table("funcoes_equipe").select("*").order("nome").execute()
+    return resposta.data or []
+
+
+# ------------------------------------------------------------------
+# TRABALHOS -- gravação via RPC (atômica) + leitura pro Financeiro.
+# ------------------------------------------------------------------
+
+def registrar_trabalho(payload: dict):
     """
-    Abre a planilha usando gspread diretamente (mesmas credenciais do secrets.toml).
-    Usado só para inserir linhas novas, sem precisar reler a planilha inteira
-    como o conn.update() da streamlit-gsheets-connection exige.
+    Chama a função registrar_trabalho() no Postgres via RPC: acha-ou-cria
+    o cliente, insere o trabalho, e insere os vínculos de serviços,
+    especificidades e equipe -- tudo numa transação só do lado do banco.
     """
-    creds = st.secrets["connections"]["gsheets"]
-    creds_dict = {
-        "type": creds["type"],
-        "project_id": creds["project_id"],
-        "private_key_id": creds["private_key_id"],
-        "private_key": creds["private_key"],
-        "client_email": creds["client_email"],
-        "client_id": creds["client_id"],
-        "auth_uri": creds["auth_uri"],
-        "token_uri": creds["token_uri"],
-        "auth_provider_x509_cert_url": creds["auth_provider_x509_cert_url"],
-        "client_x509_cert_url": creds["client_x509_cert_url"],
-    }
-    client = gspread.service_account_from_dict(creds_dict)
-    return client.open_by_url(creds["spreadsheet"])
-
-
-def _adicionar_linha(worksheet_nome: str, colunas: list, dados: dict):
-    """
-    Adiciona UMA linha no final da aba indicada, sem reler a planilha inteira.
-    Mais rápido e sem o risco de duas escritas quase simultâneas se atropelarem
-    (o que acontecia no padrão anterior de ler tudo -> reescrever tudo).
-    """
-    planilha = _abrir_planilha_gspread()
-    aba = planilha.worksheet(worksheet_nome)
-    linha = [dados.get(col) if dados.get(col) is not None else "" for col in colunas]
-    aba.append_row(linha, value_input_option="USER_ENTERED")
+    client = _conectar()
+    client.rpc("registrar_trabalho", {"payload": payload}).execute()
     st.cache_data.clear()
 
 
-def salvar_registro(registro: dict):
+@st.cache_data(ttl=5)
+def buscar_trabalhos() -> pd.DataFrame:
     """
-    Recebe um dicionário com as chaves de COLUNAS e adiciona
-    uma nova linha na planilha, sem reler o que já existe.
+    Retorna os trabalhos com o nome do cliente já embutido (join via
+    PostgREST), prontos pro Financeiro. Não inclui serviços/especificidade/
+    equipe -- esta tela é operacional (cobrança, prazos), não analítica.
     """
-    _adicionar_linha("registros", COLUNAS, registro)
+    client = _conectar()
+    resposta = (
+        client.table("trabalhos")
+        .select("*, clientes(nome)")
+        .order("id")
+        .execute()
+    )
+    dados = resposta.data or []
 
+    if not dados:
+        return pd.DataFrame(
+            columns=[
+                "id", "nome_cliente", "nome_projeto", "nome_evento",
+                "data_execucao", "moeda", "taxa_cambio", "cache_total",
+                "custos_operacao", "status_pagamento", "previsao_recebimento",
+                "data_entrega_combinada",
+            ]
+        )
 
-def buscar_todos_registros() -> pd.DataFrame:
-    """
-    Retorna todos os registros já salvos, prontos para os dashboards.
-    """
-    conn = _conectar()
-    df = conn.read(worksheet="registros", ttl=5)
-    df = df.dropna(how="all")
+    df = pd.DataFrame(dados)
+    df["nome_cliente"] = df["clientes"].apply(lambda c: c.get("nome") if isinstance(c, dict) else None)
+    df = df.drop(columns=["clientes"])
 
-    # Garante que colunas numéricas venham como número mesmo se o Sheets
-    # devolver como texto
-    for col in COLUNAS_NUMERICAS:
+    for col in ["taxa_cambio", "cache_total", "custos_operacao"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
 
 
-def buscar_nichos_existentes() -> list:
-    """
-    Retorna a lista de nichos de mercado que já foram usados em algum
-    registro salvo, para alimentar o dropdown do formulário.
-    Nunca quebra o app: se der erro ou não houver dados, retorna lista vazia.
-    """
-    try:
-        df = buscar_todos_registros()
-        if df.empty or "nicho_mercado" not in df.columns:
-            return []
-        nichos = df["nicho_mercado"].dropna().astype(str).str.strip()
-        nichos = nichos[nichos != ""]
-        return sorted(nichos.unique().tolist())
-    except Exception:
-        return []
-
-
 # ------------------------------------------------------------------
-# PIPELINE: artistas/clientes em negociação, separado dos registros
-# de trabalhos já executados. Fica numa aba própria da planilha
-# chamada "pipeline".
+# PIPELINE: mesma lógica de antes, só troca nicho texto por nicho_id (FK).
 # ------------------------------------------------------------------
 
-PIPELINE_COLUNAS = [
-    "nome_contato",
-    "nicho_mercado",
-    "status",
-    "valor_estimado",
-    "data_prevista",
-    "observacoes",
-]
+PIPELINE_COLUNAS = ["nome_contato", "nicho_id", "status", "valor_estimado", "data_prevista", "observacoes"]
 
 
+@st.cache_data(ttl=5)
 def buscar_pipeline() -> pd.DataFrame:
-    """Retorna todos os itens do pipeline (artistas/clientes em negociação)."""
-    conn = _conectar()
-    df = conn.read(worksheet="pipeline", ttl=5)
-    df = df.dropna(how="all")
-    if "valor_estimado" in df.columns:
-        df["valor_estimado"] = pd.to_numeric(df["valor_estimado"], errors="coerce")
-    return df
+    """Retorna o pipeline com o nome do nicho já embutido (join), pra exibir na tabela."""
+    client = _conectar()
+    resposta = client.table("pipeline").select("*, nichos(nome)").order("id").execute()
+    dados = resposta.data or []
+
+    if not dados:
+        return pd.DataFrame(
+            columns=["nome_contato", "nicho_mercado", "status", "valor_estimado", "data_prevista", "observacoes"]
+        )
+
+    df = pd.DataFrame(dados)
+    df["nicho_mercado"] = df["nichos"].apply(lambda n: n.get("nome") if isinstance(n, dict) else None)
+    df = df.drop(columns=["nichos", "id", "nicho_id", "created_at"], errors="ignore")
+    df["valor_estimado"] = pd.to_numeric(df["valor_estimado"], errors="coerce")
+
+    ordem = ["nome_contato", "nicho_mercado", "status", "valor_estimado", "data_prevista", "observacoes"]
+    return df[[c for c in ordem if c in df.columns]]
 
 
 def salvar_pipeline_item(item: dict):
-    """Adiciona um novo item (artista/cliente) ao pipeline, sem reler tudo."""
-    _adicionar_linha("pipeline", PIPELINE_COLUNAS, item)
+    """Adiciona um novo item ao pipeline. Espera `nicho_id`, não nome do nicho."""
+    client = _conectar()
+    linha = {col: item.get(col) for col in PIPELINE_COLUNAS}
+    client.table("pipeline").insert(linha).execute()
+    st.cache_data.clear()
 
 
 def atualizar_pipeline_completo(df: pd.DataFrame):
     """
-    Sobrescreve a aba pipeline inteira com o dataframe editado.
-    Usado depois que o usuário edita a tabela direto na tela (st.data_editor).
+    Sobrescreve a tabela pipeline inteira com o dataframe editado.
+    Espera uma coluna `nicho_id` já resolvida pelo chamador (ui/pipeline.py
+    faz o mapeamento nome -> id antes de chamar esta função).
     """
-    conn = _conectar()
-    conn.update(worksheet="pipeline", data=df)
+    client = _conectar()
+    df_colunas_negocio = df[PIPELINE_COLUNAS]
+    df_limpo = df_colunas_negocio.where(pd.notnull(df_colunas_negocio), None)
+    registros = df_limpo.to_dict("records")
+
+    client.table("pipeline").delete().neq("id", -1).execute()
+    if registros:
+        client.table("pipeline").insert(registros).execute()
+
     st.cache_data.clear()

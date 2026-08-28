@@ -1,180 +1,251 @@
 """
 ui/formulario_registro.py
 --------------------------
-Módulo PRODUTOR de dados: o formulário onde o usuário registra um
-trabalho já executado. Só escreve na planilha (via data_layer.salvar_registro),
-nunca lê para gerar gráficos ou análises -- essa responsabilidade é do
-módulo ui/dashboard.py.
+Módulo PRODUTOR de dados: formulário onde o usuário registra um trabalho
+executado. A partir da v4, os catálogos (nicho, tipo de cliente, canal,
+serviço, especificidade, pessoas/funções da equipe) vêm do banco via
+data_layer -- nada de "+ Adicionar novo" aqui, esses catálogos são
+geridos pelo Arthur direto no Supabase.
+
+Os antigos campos de Horas de Captação/Edição e Tamanho de Equipe saíram
+-- viraram a seção "Equipe envolvida" (quem participou, função, cachê e
+benefícios recebidos).
 """
 
 from datetime import date
+import pandas as pd
 import streamlit as st
 
-from data_layer import salvar_registro
-from niches_config import get_config
-from opcoes import CANAIS_AQUISICAO
-from ui.helpers import NOVO_NICHO_LABEL, OUTRO_CANAL_LABEL, obter_opcoes_nicho
+from data_layer import (
+    registrar_trabalho,
+    buscar_nichos,
+    buscar_tipos_cliente,
+    buscar_canais_aquisicao,
+    buscar_servicos,
+    buscar_especificidades,
+    buscar_pessoas_equipe,
+    buscar_funcoes_equipe,
+)
+from opcoes import STATUS_PAGAMENTO, MOEDAS
 
 
 def render():
     st.header("Registrar novo trabalho")
 
-    col_data, col_espaco = st.columns([1, 2])
+    nichos = buscar_nichos()
+    if not nichos:
+        st.error("Nenhum nicho cadastrado ainda. Peça pro Arthur cadastrar em `nichos` no Supabase.")
+        return
+
+    nicho_por_nome = {n["nome"]: n for n in nichos}
+
+    col_data, _ = st.columns([1, 2])
     with col_data:
-        data_execucao = st.date_input("Data de Execução", value=date.today())
+        data_execucao = st.date_input("Data de Execução", value=date.today(), format="DD/MM/YYYY")
 
     st.divider()
 
-    # Bloco 2: Inteligência Comercial (aqui mora a condicional)
     col_nicho, col_cliente = st.columns(2)
 
     with col_nicho:
-        # O dropdown junta os nichos padrão + os que já apareceram em registros
-        # salvos anteriormente, sempre em ordem alfabética, e no fim oferece a
-        # opção de cadastrar um nicho totalmente novo.
-        opcoes_nicho = obter_opcoes_nicho()
-        escolha_nicho = st.selectbox("Nicho de Mercado", opcoes_nicho)
+        nome_nicho = st.selectbox("Nicho de Mercado", list(nicho_por_nome.keys()))
+        nicho = nicho_por_nome[nome_nicho]
 
-        if escolha_nicho == NOVO_NICHO_LABEL:
-            nicho_mercado = st.text_input("Nome do novo nicho de mercado").strip()
+        tipos_cliente = buscar_tipos_cliente(nicho["id"])
+        tipo_cliente = None
+        if tipos_cliente:
+            tipo_por_nome = {t["nome"]: t for t in tipos_cliente}
+            escolha_tipo = st.selectbox("Tipo de Cliente", list(tipo_por_nome.keys()))
+            tipo_cliente = tipo_por_nome[escolha_tipo]
+
+        especificidades = buscar_especificidades(nicho["id"])
+        especificidade_ids = []
+        especificidade_texto = ""
+        if especificidades:
+            espec_por_nome = {e["nome"]: e for e in especificidades}
+            label = nicho.get("especificidade_label") or "Especificidade"
+            if nicho.get("especificidade_multipla"):
+                escolhidas = st.multiselect(label, list(espec_por_nome.keys()))
+            else:
+                escolhida = st.selectbox(label, list(espec_por_nome.keys()))
+                escolhidas = [escolhida] if escolhida else []
+            especificidade_ids = [espec_por_nome[e]["id"] for e in escolhidas]
+            especificidade_texto = ", ".join(escolhidas)
         else:
-            nicho_mercado = escolha_nicho
+            st.caption("ℹ️ Esse nicho ainda não tem especificidades cadastradas.")
+
+    evento_obrigatorio = bool(nicho.get("evento_obrigatorio"))
+    incluir_cliente_no_nome = bool(tipo_cliente.get("incluir_no_nome_projeto")) if tipo_cliente else True
 
     with col_cliente:
         nome_cliente = st.text_input("Nome do Cliente/DJ/Artista/Contratante")
+
+        label_evento = "Nome do Evento" + (" *" if evento_obrigatorio else " (opcional)")
         nome_evento = st.text_input(
-            "Nome do Evento (opcional)",
+            label_evento,
             placeholder="Ex: Infected, Casa Aberta, Lançamento X",
-            help="Se o trabalho tiver um nome de evento/festa/campanha, coloque aqui — ajuda a montar o nome do projeto.",
+            help="Obrigatório para esse nicho." if evento_obrigatorio else None,
         )
 
-        # Canal de Aquisição: lista fixa + opção de digitar algo novo
-        escolha_canal = st.selectbox("Canal de Aquisição", CANAIS_AQUISICAO + [OUTRO_CANAL_LABEL])
-        if escolha_canal == OUTRO_CANAL_LABEL:
-            canal_aquisicao = st.text_input("Qual canal de aquisição?").strip()
-        else:
-            canal_aquisicao = escolha_canal
+        canais = buscar_canais_aquisicao()
+        canal_por_nome = {c["nome"]: c for c in canais}
+        nome_canal = st.selectbox("Canal de Aquisição", list(canal_por_nome.keys()))
+        canal = canal_por_nome[nome_canal]
 
-    # Consulta se esse nicho tem perguntas específicas configuradas.
-    # Se não tiver (nicho novo ou ainda sem configuração), não força
-    # nenhum campo extra -- só os campos padrão do registro.
-    config_nicho = get_config(nicho_mercado) if nicho_mercado else None
-
-    tipo_cliente = None
-    especificidade = None
-
-    if config_nicho:
-        col_tipo, col_espec = st.columns(2)
-        with col_tipo:
-            tipo_cliente = st.selectbox("Tipo de Cliente", config_nicho["tipo_cliente_options"])
-        with col_espec:
-            if config_nicho["especificidade_type"] == "select":
-                especificidade = st.selectbox(
-                    config_nicho["especificidade_label"],
-                    config_nicho["especificidade_options"],
-                )
-            else:
-                especificidade = st.text_input(
-                    config_nicho["especificidade_label"],
-                    placeholder=config_nicho.get("especificidade_placeholder", ""),
-                )
-    elif nicho_mercado:
-        st.caption(
-            "ℹ️ Esse nicho ainda não tem perguntas específicas configuradas — "
-            "usando apenas os campos padrão."
-        )
-
-    servicos_entregues = st.multiselect(
+    servicos = buscar_servicos()
+    servico_por_nome = {s["nome"]: s for s in servicos}
+    servicos_escolhidos = st.multiselect(
         "Serviços Entregues (o pacote combinado costuma juntar mais de um)",
-        ["Aftermovie", "Fotos", "Voo de Drone", "Reels"],
+        list(servico_por_nome.keys()),
     )
+    servico_ids = [servico_por_nome[s]["id"] for s in servicos_escolhidos]
 
-    # Sugestão automática de nome do projeto. Se tiver nome de evento
-    # preenchido, segue o padrão "Cliente/DJ + Evento + Ano" (ex: "Dezzert
-    # Infected 2025"). Caso contrário, usa o formato genérico anterior.
     ano_execucao = data_execucao.year
-
     if nome_evento:
-        sugestao_nome = " ".join([p for p in [nome_cliente, nome_evento, str(ano_execucao)] if p])
+        partes = ([nome_cliente] if incluir_cliente_no_nome else []) + [nome_evento, str(ano_execucao)]
+        sugestao_nome = " ".join([p for p in partes if p])
     else:
-        partes_sugestao = [p for p in [nome_cliente, especificidade or nicho_mercado] if p]
+        partes_sugestao = [p for p in [nome_cliente, especificidade_texto or nome_nicho] if p]
         partes_sugestao.append(data_execucao.strftime("%d/%m/%Y"))
         sugestao_nome = " - ".join(partes_sugestao)
 
     nome_projeto = st.text_input(
-        "Nome do Projeto",
-        value=sugestao_nome,
-        help="Sugestão automática (Cliente/DJ + Evento + Ano, quando houver) — pode editar à vontade.",
+        "Nome do Projeto", value=sugestao_nome, help="Sugestão automática — pode editar à vontade."
     )
 
     st.divider()
 
-    # Bloco 3: Esforço e Tempo
+    st.subheader("👥 Equipe envolvida")
     st.caption(
-        "📌 Os campos abaixo são só para o SEU controle interno (calcular se o pacote valeu a pena). "
-        "Ele continua fechando por valor de pacote, não por hora."
+        "Quem participou desse trabalho, em que função, e o que recebeu (cachê e/ou "
+        "benefícios cedidos pelo contratante — transporte, alimentação, consumação, ingresso)."
     )
-    col1, col2, col_equipe = st.columns(3)
-    with col1:
-        horas_captacao = st.number_input("Horas de Captação", min_value=0.0, step=0.5)
-    with col2:
-        horas_edicao = st.number_input("Horas de Edição", min_value=0.0, step=0.5)
-    with col_equipe:
-        tamanho_equipe = st.number_input(
-            "Pessoas na Equipe (incluindo você)",
-            min_value=1,
-            value=1,
-            step=1,
-        )
+
+    pessoas = buscar_pessoas_equipe()
+    funcoes = buscar_funcoes_equipe()
+    nomes_pessoas = [p["nome"] for p in pessoas]
+    nomes_funcoes = [f["nome"] for f in funcoes]
+
+    if not pessoas:
+        st.warning("Nenhuma pessoa cadastrada em `pessoas_equipe` ainda — peça pro Arthur cadastrar.")
+
+    modelo_equipe = pd.DataFrame([{
+        "pessoa": nomes_pessoas[0] if nomes_pessoas else "",
+        "funcao": "",
+        "cache_pago": 0.0,
+        "transporte": False,
+        "alimentacao": False,
+        "consumacao": False,
+        "ingresso": False,
+    }])
+
+    equipe_editada = st.data_editor(
+        modelo_equipe,
+        column_config={
+            "pessoa": st.column_config.SelectboxColumn("Pessoa", options=nomes_pessoas, required=True),
+            "funcao": st.column_config.SelectboxColumn("Função", options=[""] + nomes_funcoes),
+            "cache_pago": st.column_config.NumberColumn("Cachê Pago (R$, opcional)", min_value=0.0, format="%.2f"),
+            "transporte": st.column_config.CheckboxColumn("Transporte"),
+            "alimentacao": st.column_config.CheckboxColumn("Alimentação"),
+            "consumacao": st.column_config.CheckboxColumn("Consumação"),
+            "ingresso": st.column_config.CheckboxColumn("Ingresso"),
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="editor_equipe",
+    )
 
     st.divider()
 
-    # Bloco 4: Controle de Caixa
+    col_moeda, col_taxa = st.columns(2)
+    with col_moeda:
+        moeda = st.selectbox("Moeda do Pacote", MOEDAS, help="Clientes de fora do Brasil às vezes fecham em dólar ou euro.")
+    with col_taxa:
+        if moeda != "BRL":
+            taxa_cambio = st.number_input(
+                f"Taxa de Câmbio (1 {moeda} = quantos R$)", min_value=0.0, step=0.01, value=5.0
+            )
+        else:
+            taxa_cambio = 1.0
+            st.caption("Sem conversão necessária — pacote já fechado em Real.")
+
     col3, col4 = st.columns(2)
     with col3:
-        cache_total = st.number_input("Valor do Pacote Negociado (R$)", min_value=0.0, step=50.0)
+        cache_total = st.number_input(f"Valor do Pacote Negociado ({moeda})", min_value=0.0, step=50.0)
     with col4:
-        custos_operacao = st.number_input("Custos de Operação (R$)", min_value=0.0, step=10.0)
+        custos_operacao = st.number_input(
+            "Custos de Operação (R$)",
+            min_value=0.0,
+            step=10.0,
+            help="Sempre em Real — gastos diretos (Uber, gasolina, material...). Cachê da equipe entra na seção acima, não aqui.",
+        )
 
     col5, col6, col7 = st.columns(3)
     with col5:
-        status_pagamento = st.selectbox(
-            "Status do Pagamento", ["Pendente", "50% Pago", "Totalmente Pago"]
-        )
+        status_pagamento = st.selectbox("Status do Pagamento", STATUS_PAGAMENTO)
     with col6:
-        previsao_recebimento = st.date_input("Previsão de Recebimento")
+        previsao_recebimento = st.date_input("Previsão de Recebimento", format="DD/MM/YYYY")
     with col7:
-        data_entrega_combinada = st.date_input("Prazo de Entrega Combinado")
+        data_entrega_combinada = st.date_input("Prazo de Entrega Combinado", format="DD/MM/YYYY")
 
     st.divider()
 
     if st.button("💾 Salvar Registro", use_container_width=True):
+        erros = []
         if not nome_projeto:
-            st.error("Preencha o nome do projeto antes de salvar.")
-        elif not nicho_mercado:
-            st.error("Digite o nome do novo nicho de mercado antes de salvar.")
-        elif not canal_aquisicao:
-            st.error("Digite o canal de aquisição antes de salvar.")
+            erros.append("Preencha o nome do projeto.")
+        if not nome_cliente:
+            erros.append("Preencha o nome do cliente.")
+        if evento_obrigatorio and not nome_evento:
+            erros.append(f"Nome do Evento é obrigatório para o nicho '{nome_nicho}'.")
+        if moeda != "BRL" and taxa_cambio <= 0:
+            erros.append("Informe uma taxa de câmbio válida pra converter o valor pra Real.")
+
+        pessoa_id_por_nome = {p["nome"]: p["id"] for p in pessoas}
+        funcao_id_por_nome = {f["nome"]: f["id"] for f in funcoes}
+
+        equipe_payload = []
+        for _, linha in equipe_editada.iterrows():
+            nome_pessoa = linha.get("pessoa")
+            if not nome_pessoa:
+                continue
+            if nome_pessoa not in pessoa_id_por_nome:
+                erros.append(f"Pessoa '{nome_pessoa}' não encontrada no catálogo.")
+                continue
+            equipe_payload.append({
+                "pessoa_id": pessoa_id_por_nome[nome_pessoa],
+                "funcao_id": funcao_id_por_nome.get(linha.get("funcao")) if linha.get("funcao") else None,
+                "cache_pago": linha.get("cache_pago") or None,
+                "recebeu_transporte": bool(linha.get("transporte")),
+                "recebeu_alimentacao": bool(linha.get("alimentacao")),
+                "recebeu_consumacao": bool(linha.get("consumacao")),
+                "recebeu_ingresso": bool(linha.get("ingresso")),
+            })
+
+        if erros:
+            for erro in erros:
+                st.error(erro)
         else:
-            registro = {
+            payload = {
+                "cliente_nome": nome_cliente,
+                "nicho_id": nicho["id"],
+                "tipo_cliente_id": tipo_cliente["id"] if tipo_cliente else None,
+                "canal_aquisicao_id": canal["id"],
                 "nome_projeto": nome_projeto,
+                "nome_evento": nome_evento or None,
                 "data_execucao": str(data_execucao),
-                "nicho_mercado": nicho_mercado,
-                "tipo_cliente": tipo_cliente,
-                "nome_cliente": nome_cliente,
-                "nome_evento": nome_evento,
-                "canal_aquisicao": canal_aquisicao,
-                "servicos_entregues": ", ".join(servicos_entregues),
-                "especificidade": especificidade,
-                "horas_captacao": horas_captacao,
-                "horas_edicao": horas_edicao,
-                "tamanho_equipe": tamanho_equipe,
+                "moeda": moeda,
+                "taxa_cambio": taxa_cambio,
                 "cache_total": cache_total,
                 "custos_operacao": custos_operacao,
                 "status_pagamento": status_pagamento,
                 "previsao_recebimento": str(previsao_recebimento),
                 "data_entrega_combinada": str(data_entrega_combinada),
+                "servico_ids": servico_ids,
+                "especificidade_ids": especificidade_ids,
+                "equipe": equipe_payload,
             }
-            salvar_registro(registro)
+            registrar_trabalho(payload)
             st.success("Registro salvo com sucesso!")
             st.balloons()
