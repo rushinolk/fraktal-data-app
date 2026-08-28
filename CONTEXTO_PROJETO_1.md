@@ -5,6 +5,9 @@
 
 ---
 
+> **Status**: v1 funcional considerada completa nesta sessão — próximo passo é deploy (ver
+> checklist na conversa/README), não mais desenvolvimento de funcionalidade nova.
+
 ## 1. Objetivo do projeto
 
 Construir uma experiência de dados completa — não um projeto simples pra um amigo, mas algo
@@ -114,6 +117,8 @@ ARQUIVOS ÓRFÃOS (não usados mais, remover manualmente do repositório):
 - Aba Financeiro: cards de resumo, previsibilidade de caixa (tabela), painel de cobrança, prazos
   de entrega — datas exibidas em dd/mm/aaaa
 - Gravação atômica de um trabalho completo (cliente + trabalho + bridges) via função no Postgres
+- Conversão Pipeline → Novo Registro: marca o item como "Fechado" (mantém histórico) e pré-preenche
+  cliente/nicho/valor no formulário via `st.session_state`, evitando digitar os dados duas vezes
 
 ---
 
@@ -139,7 +144,6 @@ ARQUIVOS ÓRFÃOS (não usados mais, remover manualmente do repositório):
    banco recriado.
 
 ### Ideias de v2 (adiadas conscientemente)
-- Botão pra converter um item do Pipeline em trabalho fechado.
 - Capturar data real de entrega (não só a combinada).
 - Decidir se `valor_estimado_beneficio` (em `trabalho_equipe`) será usado — hoje é campo
   reservado, sem UI.

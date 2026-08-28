@@ -2,11 +2,15 @@
 ui/pipeline.py
 --------------
 Módulo híbrido: PRODUTOR (formulário pra adicionar item ao pipeline) e
-CONSUMIDOR (tabela editável). A partir da v4, nicho passou a ser FK pra
-tabela `nichos` -- o dropdown mostra o nome, mas guarda/edita o id por
-baixo (mapeamento feito aqui, não no data_layer).
+CONSUMIDOR (tabela editável). Nicho é FK pra tabela `nichos`.
+
+Inclui a conversão Pipeline -> Novo Registro: marca o item como "Fechado"
+(mantém histórico, não apaga) e pré-preenche cliente/nicho/valor no
+formulário via st.session_state -- evita digitar os dados do cliente
+de novo.
 """
 
+import pandas as pd
 import streamlit as st
 
 from data_layer import buscar_pipeline, salvar_pipeline_item, atualizar_pipeline_completo, buscar_nichos
@@ -66,26 +70,77 @@ def render():
 
     if df_pipeline.empty:
         st.info("Nenhum item no pipeline ainda. Adicione o primeiro acima.")
+        return
+
+    st.write("Edite direto na tabela abaixo (clique numa célula pra mudar status, valor, etc.) e depois clique em Salvar.")
+    df_pipeline_editado = st.data_editor(
+        df_pipeline,
+        column_config={
+            "status": st.column_config.SelectboxColumn("Status", options=STATUS_PIPELINE),
+            "nicho_mercado": st.column_config.SelectboxColumn("Nicho", options=nomes_nicho),
+            "nome_contato": "Artista/Cliente",
+            "valor_estimado": st.column_config.NumberColumn("Valor Estimado (R$)", format="R$ %.2f"),
+            "data_prevista": st.column_config.DateColumn("Data Prevista", format="DD/MM/YYYY"),
+            "observacoes": "Observações",
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+        key="editor_pipeline",
+    )
+
+    if st.button("💾 Salvar alterações no Pipeline"):
+        df_para_salvar = df_pipeline_editado.copy()
+        df_para_salvar["nicho_id"] = df_para_salvar["nicho_mercado"].map(id_por_nome_nicho)
+        atualizar_pipeline_completo(df_para_salvar)
+        st.success("Pipeline atualizado!")
+        st.rerun()
+
+    st.divider()
+
+    # ------------------------------------------------------------
+    # Conversão Pipeline -> Novo Registro: evita digitar os dados
+    # do cliente de novo quando a negociação fecha de verdade.
+    # ------------------------------------------------------------
+    st.subheader("✅ Fechar negociação")
+    st.caption(
+        "Escolha um item do pipeline pra pré-preencher o formulário de Novo Registro. "
+        "O item é marcado como 'Fechado' aqui (fica no histórico), e você completa o resto lá."
+    )
+
+    df_convertivel = df_pipeline[~df_pipeline["status"].isin(["Fechado", "Perdido"])].reset_index(drop=True)
+
+    if df_convertivel.empty:
+        st.caption("Nenhum item em aberto pra converter no momento.")
     else:
-        st.write("Edite direto na tabela abaixo (clique numa célula pra mudar status, valor, etc.) e depois clique em Salvar.")
-        df_pipeline_editado = st.data_editor(
-            df_pipeline,
-            column_config={
-                "status": st.column_config.SelectboxColumn("Status", options=STATUS_PIPELINE),
-                "nicho_mercado": st.column_config.SelectboxColumn("Nicho", options=nomes_nicho),
-                "nome_contato": "Artista/Cliente",
-                "valor_estimado": st.column_config.NumberColumn("Valor Estimado (R$)", format="R$ %.2f"),
-                "data_prevista": st.column_config.DateColumn("Data Prevista", format="DD/MM/YYYY"),
-                "observacoes": "Observações",
-            },
-            num_rows="dynamic",
-            use_container_width=True,
-            key="editor_pipeline",
+        opcoes_conversao = [
+            f"{row.nome_contato} — {row.nicho_mercado} ({row.status})"
+            for row in df_convertivel.itertuples()
+        ]
+        escolha_pos = st.selectbox(
+            "Item do pipeline",
+            options=list(range(len(opcoes_conversao))),
+            format_func=lambda i: opcoes_conversao[i],
+            key="pipeline_conversao_escolha",
         )
 
-        if st.button("💾 Salvar alterações no Pipeline"):
-            df_para_salvar = df_pipeline_editado.copy()
-            df_para_salvar["nicho_id"] = df_para_salvar["nicho_mercado"].map(id_por_nome_nicho)
-            atualizar_pipeline_completo(df_para_salvar)
-            st.success("Pipeline atualizado!")
+        if st.button("➡️ Preencher Novo Registro com esses dados"):
+            linha = df_convertivel.iloc[escolha_pos]
+
+            st.session_state["form_nome_cliente"] = linha["nome_contato"]
+            if linha["nicho_mercado"] in nomes_nicho:
+                st.session_state["form_nicho"] = linha["nicho_mercado"]
+            if pd.notna(linha["valor_estimado"]):
+                st.session_state["form_cache_total"] = float(linha["valor_estimado"])
+
+            # Marca como Fechado no pipeline em vez de apagar -- mantém histórico.
+            df_atualizado = df_pipeline.copy()
+            filtro = (
+                (df_atualizado["nome_contato"] == linha["nome_contato"])
+                & (df_atualizado["nicho_mercado"] == linha["nicho_mercado"])
+            )
+            df_atualizado.loc[filtro, "status"] = "Fechado"
+            df_atualizado["nicho_id"] = df_atualizado["nicho_mercado"].map(id_por_nome_nicho)
+            atualizar_pipeline_completo(df_atualizado)
+
+            st.success("Dados prontos! Vá até a aba '📝 Novo Registro' pra completar e salvar.")
             st.rerun()

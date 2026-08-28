@@ -39,6 +39,10 @@ def render():
 
     nicho_por_nome = {n["nome"]: n for n in nichos}
 
+    veio_do_pipeline = "form_nome_cliente" in st.session_state or "form_nicho" in st.session_state
+    if veio_do_pipeline:
+        st.info("📥 Formulário pré-preenchido a partir de um item do Pipeline. Complete o restante e salve.")
+
     col_data, _ = st.columns([1, 2])
     with col_data:
         data_execucao = st.date_input("Data de Execução", value=date.today(), format="DD/MM/YYYY")
@@ -48,7 +52,7 @@ def render():
     col_nicho, col_cliente = st.columns(2)
 
     with col_nicho:
-        nome_nicho = st.selectbox("Nicho de Mercado", list(nicho_por_nome.keys()))
+        nome_nicho = st.selectbox("Nicho de Mercado", list(nicho_por_nome.keys()), key="form_nicho")
         nicho = nicho_por_nome[nome_nicho]
 
         tipos_cliente = buscar_tipos_cliente(nicho["id"])
@@ -78,7 +82,7 @@ def render():
     incluir_cliente_no_nome = bool(tipo_cliente.get("incluir_no_nome_projeto")) if tipo_cliente else True
 
     with col_cliente:
-        nome_cliente = st.text_input("Nome do Cliente/DJ/Artista/Contratante")
+        nome_cliente = st.text_input("Nome do Cliente/DJ/Artista/Contratante", key="form_nome_cliente")
 
         label_evento = "Nome do Evento" + (" *" if evento_obrigatorio else " (opcional)")
         nome_evento = st.text_input(
@@ -172,7 +176,9 @@ def render():
 
     col3, col4 = st.columns(2)
     with col3:
-        cache_total = st.number_input(f"Valor do Pacote Negociado ({moeda})", min_value=0.0, step=50.0)
+        cache_total = st.number_input(
+            f"Valor do Pacote Negociado ({moeda})", min_value=0.0, step=50.0, key="form_cache_total"
+        )
     with col4:
         custos_operacao = st.number_input(
             "Custos de Operação (R$)",
@@ -247,5 +253,7 @@ def render():
                 "equipe": equipe_payload,
             }
             registrar_trabalho(payload)
+            for chave in ["form_nome_cliente", "form_nicho", "form_cache_total"]:
+                st.session_state.pop(chave, None)
             st.success("Registro salvo com sucesso!")
             st.balloons()
